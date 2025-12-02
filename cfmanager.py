@@ -40,6 +40,7 @@ DEFAULT_DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
 DEFAULT_FILE_MAX_BYTES = 1_000_000  # 1 MB
 DEFAULT_FILE_BACKUPS = 3
 _LOG_CONFIGURED = False
+_LOG_FILE_PATH = None
 
 
 def configure_logging(log_file_path=None):
@@ -55,6 +56,7 @@ def configure_logging(log_file_path=None):
     root.addHandler(console_handler)
 
     if log_file_path:
+        Path(log_file_path).expanduser().parent.mkdir(parents=True, exist_ok=True)
         file_handler = RotatingFileHandler(
             log_file_path,
             maxBytes=DEFAULT_FILE_MAX_BYTES,
@@ -67,11 +69,26 @@ def configure_logging(log_file_path=None):
 
 def ensure_logging(log_file_path=None):
     """Configure logging once per process."""
-    global _LOG_CONFIGURED
-    if _LOG_CONFIGURED:
+    global _LOG_CONFIGURED, _LOG_FILE_PATH
+
+    if not _LOG_CONFIGURED:
+        configure_logging(log_file_path)
+        _LOG_CONFIGURED = True
+        _LOG_FILE_PATH = log_file_path
         return
-    configure_logging(log_file_path)
-    _LOG_CONFIGURED = True
+
+    # If logging already configured without a file, but a file is now provided, add it.
+    if log_file_path and _LOG_FILE_PATH != log_file_path:
+        Path(log_file_path).expanduser().parent.mkdir(parents=True, exist_ok=True)
+        file_handler = RotatingFileHandler(
+            log_file_path,
+            maxBytes=DEFAULT_FILE_MAX_BYTES,
+            backupCount=DEFAULT_FILE_BACKUPS,
+            encoding="utf-8",
+        )
+        file_handler.setFormatter(logging.Formatter(DEFAULT_LOG_FORMAT, DEFAULT_DATE_FORMAT))
+        logging.getLogger().addHandler(file_handler)
+        _LOG_FILE_PATH = log_file_path
 
 
 logger = logging.getLogger(__name__)
@@ -523,8 +540,10 @@ def cli(ctx, log_file):
 )
 def create_dns_record(zone_name, api_token, hostname, record_type, value, log_file):
     """Create a host in a specific DNS zone."""
-    ensure_logging(log_file)
     ctx = click.get_current_context()
+    log_file = log_file or ctx.obj.get("log_file")
+    ensure_logging(log_file)
+    logger.info("Command=create-dns-record zone=%s host=%s type=%s", zone_name, hostname, record_type)
     try:
         token = get_api_token(api_token)
         zone_id = get_zone_id_by_name(token, zone_name)
@@ -564,8 +583,10 @@ def create_dns_record(zone_name, api_token, hostname, record_type, value, log_fi
 )
 def list_dns_zones(api_token, page_size, zone_name, log_file):
     """List DNS zones (all or filtered by name) and show their names and IDs."""
-    ensure_logging(log_file)
     ctx = click.get_current_context()
+    log_file = log_file or ctx.obj.get("log_file")
+    ensure_logging(log_file)
+    logger.info("Command=list-dns-zones zone_filter=%s page_size=%s", zone_name, page_size)
     try:
         token = get_api_token(api_token)
         list_dns_zones_api(
@@ -597,8 +618,10 @@ def list_dns_zones(api_token, page_size, zone_name, log_file):
 )
 def remove_dns_record(zone_name, api_token, record_name, log_file):
     """Remove a DNS record from a specific zone after user confirmation."""
-    ensure_logging(log_file)
     ctx = click.get_current_context()
+    log_file = log_file or ctx.obj.get("log_file")
+    ensure_logging(log_file)
+    logger.info("Command=remove-dns-record zone=%s record=%s", zone_name, record_name)
     try:
         token = get_api_token(api_token)
         zone_id = get_zone_id_by_name(token, zone_name)
@@ -639,8 +662,10 @@ def remove_dns_record(zone_name, api_token, record_name, log_file):
 )
 def list_dns_records(zone_name, api_token, page_size, log_file):
     """List DNS records of a zone in a table."""
-    ensure_logging(log_file)
     ctx = click.get_current_context()
+    log_file = log_file or ctx.obj.get("log_file")
+    ensure_logging(log_file)
+    logger.info("Command=list-dns-records zone=%s page_size=%s", zone_name, page_size)
     try:
         token = get_api_token(api_token)
         zone_id = get_zone_id_by_name(token, zone_name)
@@ -671,8 +696,10 @@ def list_dns_records(zone_name, api_token, page_size, log_file):
 )
 def export_dns_zone(zone_name, api_token, output_path, log_file):
     """Export DNS records of a zone to a BIND9-style file."""
-    ensure_logging(log_file)
     ctx = click.get_current_context()
+    log_file = log_file or ctx.obj.get("log_file")
+    ensure_logging(log_file)
+    logger.info("Command=export-dns-zone zone=%s output=%s", zone_name, output_path)
     try:
         token = get_api_token(api_token)
         zone_id = get_zone_id_by_name(token, zone_name)
