@@ -379,22 +379,35 @@ def _print_dns_records_table(records):
         return
 
     headers = ["HOSTNAME", "TYPE", "DESTINO"]
+    max_dest_width = 80  # avoid overly wide tables for very long values
+
+    def _shorten(value, limit):
+        if len(value) <= limit:
+            return value
+        return value[: limit - 3] + "..."
+
     rows = []
     for rec in records:
-        rows.append(
-            [
-                str(rec.get("name", "")),
-                str(rec.get("type", "")),
-                str(rec.get("content", "")),
-            ]
-        )
+        name = str(rec.get("name", ""))
+        rtype = str(rec.get("type", ""))
+        content_raw = str(rec.get("content", ""))
+        if rtype.upper() == "MX":
+            priority = rec.get("priority")
+            if priority is not None:
+                content_raw = f"{priority} {content_raw}"
+        content = _shorten(content_raw, max_dest_width)
+        rows.append([name, rtype, content])
 
-    header_line = " | ".join(headers)
-    separator = "-+-".join("-" * len(h) for h in headers)
-    click.echo(header_line)
-    click.echo(separator)
+    col_widths = [
+        max(len(headers[i]), max((len(r[i]) for r in rows), default=0))
+        for i in range(len(headers))
+    ]
+    fmt = " | ".join(f"{{:<{w}}}" for w in col_widths)
+
+    click.echo(fmt.format(*headers))
+    click.echo("-+-".join("-" * w for w in col_widths))
     for row in rows:
-        click.echo(" | ".join(row))
+        click.echo(fmt.format(*row))
 
 
 # ------------------------------------------------------------
