@@ -10,10 +10,13 @@ Supports reading CLOUDFLARE_API_TOKEN:
  - from the environment variable CLOUDFLARE_API_TOKEN
 
 Usage:
-    python cfmanager.py create-dns-record --zone-name mrbits.com.br \
+    python cfmanager.py create-dns-record --zone-name example.com \
         --hostname "host.example.com" --type A --value "192.168.1.10"
 
     python cfmanager.py list-dns-zones
+    python cfmanager.py list-dns-records --zone-name example.com
+    python cfmanager.py remove-dns-record --zone-name example.com --record-name host.example.com
+    python cfmanager.py export-dns-zone --zone-name example.com [--output example.com.zone]
 
 Requires:
     pip install requests click
@@ -404,7 +407,7 @@ def _print_dns_records_table(records):
         click.echo("No DNS records found.")
         return
 
-    headers = ["HOSTNAME", "TYPE", "DESTINO"]
+    headers = ["HOSTNAME", "TYPE", "DESTINATION"]
     max_dest_width = 80  # avoid overly wide tables for very long values
 
     def _shorten(value, limit):
@@ -501,7 +504,7 @@ def create_dns_record(zone_name, api_token, hostname, record_type, value):
 )
 @click.option(
     "--zone-name",
-    help="Exact zone name to filter (e.g., mrbits.com.br).",
+    help="Exact zone name to filter (e.g., example.com).",
 )
 def list_dns_zones(api_token, page_size, zone_name):
     """List DNS zones (all or filtered by name) and show their names and IDs."""
@@ -541,8 +544,8 @@ def remove_dns_record(zone_name, api_token, record_name):
         record = find_dns_record_by_name(zone_id, token, record_name)
 
         prompt = (
-            f"Remover o registro '{record_name}' (tipo {record.get('type')}) "
-            f"da zona '{zone_name}'?"
+            f"Remove record '{record_name}' (type {record.get('type')}) "
+            f"from zone '{zone_name}'?"
         )
         if not click.confirm(prompt, default=False):
             click.echo(json.dumps({"status": "cancelled"}, indent=2))

@@ -57,6 +57,41 @@ python cfmanager.py create-dns-record \
 - Accepts record types: A, AAAA, CNAME, TXT, MX, NS, SRV, PTR, CAA.  
 - `--zone-name` is resolved to the correct `zone_id` automatically.
 
+### List DNS records of a zone
+
+```bash
+python cfmanager.py list-dns-records \
+  --zone-name example.com \
+  [--api-token YOUR_TOKEN] \
+  [--page-size 100]
+```
+
+- Prints a table with `HOSTNAME`, `TYPE`, and `DESTINATION`.  
+- Prints destinations as the record content (e.g., IP, CNAME target); MX records include priority before the target.
+
+### Remove a DNS record
+
+```bash
+python cfmanager.py remove-dns-record \
+  --zone-name example.com \
+  --record-name host.example.com \
+  [--api-token YOUR_TOKEN]
+```
+
+- Locates the record by exact name, prompts for confirmation, then deletes it.
+
+### Export a DNS zone (BIND format)
+
+```bash
+python cfmanager.py export-dns-zone \
+  --zone-name example.com \
+  [--api-token YOUR_TOKEN] \
+  [--output ./example.com.zone]
+```
+
+- Uses Cloudflare's export endpoint to fetch the zone in BIND9 format.  
+- Writes to `<zone-name>.zone` by default or the path provided via `--output`.
+
 ## Logging
 
 The CLI logs actions and API responses to stdout using a timestamped format to make troubleshooting easier.
