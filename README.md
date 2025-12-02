@@ -95,4 +95,9 @@ python cfmanager.py export-dns-zone \
 ## Logging
 
 The CLI logs actions and API responses to stdout using a timestamped format.  
-Use `--log-file path/to/cfmanager.log` (can be passed before or after the subcommand) to also write rotating logs (1 MB, 3 backups).
+All commands accept `--log-file path/to/cfmanager.log` (before or after the subcommand) to also write rotating logs (1 MB, 3 backups).  
+Example:
+
+```bash
+python cfmanager.py list-dns-zones --log-file cfmanager.log
+```
