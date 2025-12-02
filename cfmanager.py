@@ -242,6 +242,162 @@ def get_zone_id_by_name(api_token, zone_name):
 
 
 # ------------------------------------------------------------
+# Find and remove DNS record
+# ------------------------------------------------------------
+def find_dns_record_by_name(zone_id, api_token, record_name):
+    """Find a DNS record by exact name within a zone."""
+    url = f"https://api.cloudflare.com/client/v4/zones/{zone_id}/dns_records"
+    headers = {
+        "Authorization": f"Bearer {api_token}",
+        "Content-Type": "application/json",
+    }
+    params = {"name": record_name, "per_page": 100}
+
+    try:
+        response = requests.get(url, headers=headers, params=params, timeout=15)
+    except requests.exceptions.RequestException as err:
+        logger.error("Communication error with Cloudflare: %s", err)
+        raise click.ClickException(
+            f"Communication error with Cloudflare: {err}"
+        ) from err
+
+    if not response.ok:
+        logger.error("HTTP error while fetching DNS record: %s", response.status_code)
+        _log_response_json(response)
+        raise click.ClickException(
+            f"HTTP error while fetching DNS record: {response.status_code}"
+        )
+
+    data = response.json()
+    if not data.get("success", False):
+        logger.error("Failed to fetch DNS record on Cloudflare.")
+        _log_response_json(response)
+        raise click.ClickException("Failed to fetch DNS record on Cloudflare.")
+
+    records = [rec for rec in data.get("result", []) if rec.get("name") == record_name]
+
+    if not records:
+        raise click.ClickException(f"DNS record not found: {record_name}")
+
+    if len(records) > 1:
+        raise click.ClickException(
+            f"Multiple DNS records found for {record_name}; refine the query."
+        )
+
+    record = records[0]
+    logger.info(
+        "Record found: %s | Type: %s | Content: %s | ID: %s",
+        record.get("name"),
+        record.get("type"),
+        record.get("content"),
+        record.get("id"),
+    )
+    return record
+
+
+def remove_dns_record_api(zone_id, api_token, record_id):
+    """Remove a DNS record using the Cloudflare API."""
+    url = f"https://api.cloudflare.com/client/v4/zones/{zone_id}/dns_records/{record_id}"
+    headers = {
+        "Authorization": f"Bearer {api_token}",
+        "Content-Type": "application/json",
+    }
+
+    try:
+        response = requests.delete(url, headers=headers, timeout=15)
+    except requests.exceptions.RequestException as err:
+        logger.error("Communication error with Cloudflare: %s", err)
+        raise click.ClickException(
+            f"Communication error with Cloudflare: {err}"
+        ) from err
+
+    if not response.ok:
+        message = f"HTTP error while deleting record: {response.status_code}"
+        logger.error(message)
+        _log_response_json(response)
+        raise click.ClickException(message)
+
+    data = response.json()
+    if not data.get("success", False):
+        message = "Failed to delete the DNS record on Cloudflare."
+        logger.error(message)
+        _log_response_json(response)
+        raise click.ClickException(message)
+
+    logger.info("DNS record deleted successfully!")
+    return data
+
+
+def list_dns_records_api(zone_id, api_token, items_per_page=100):
+    """List DNS records for a zone."""
+    url = f"https://api.cloudflare.com/client/v4/zones/{zone_id}/dns_records"
+    headers = {
+        "Authorization": f"Bearer {api_token}",
+        "Content-Type": "application/json",
+    }
+
+    records = []
+    page = 1
+    while True:
+        params = {"page": page, "per_page": items_per_page}
+        try:
+            response = requests.get(url, headers=headers, params=params, timeout=15)
+        except requests.exceptions.RequestException as err:
+            logger.error("Communication error with Cloudflare: %s", err)
+            raise click.ClickException(
+                f"Communication error with Cloudflare: {err}"
+            ) from err
+
+        if not response.ok:
+            logger.error("HTTP error while listing DNS records: %s", response.status_code)
+            _log_response_json(response)
+            raise click.ClickException(
+                f"HTTP error while listing DNS records: {response.status_code}"
+            )
+
+        data = response.json()
+        if not data.get("success", False):
+            logger.error("Failed to list DNS records on Cloudflare.")
+            _log_response_json(response)
+            raise click.ClickException("Failed to list DNS records on Cloudflare.")
+
+        records.extend(data.get("result", []))
+
+        info = data.get("result_info", {})
+        if info.get("page", page) >= info.get("total_pages", info.get("page", page)):
+            break
+        page += 1
+
+    logger.info("Total DNS records found: %s", len(records))
+    return records
+
+
+def _print_dns_records_table(records):
+    """Pretty-print DNS records as a table."""
+    if not records:
+        click.echo("No DNS records found.")
+        return
+
+    headers = ["HOSTNAME", "TYPE", "DESTINO"]
+    rows = []
+    for rec in records:
+        rows.append(
+            [
+                str(rec.get("name", "")),
+                str(rec.get("type", "")),
+                str(rec.get("content", "")),
+            ]
+        )
+
+    header_line = " | ".join(headers)
+    separator = "-+-".join("-" * len(h) for h in headers)
+    click.echo(header_line)
+    click.echo(separator)
+    for row in rows:
+        click.echo(" | ".join(row))
+
+
+# ------------------------------------------------------------
 # CLI with Click
 # ------------------------------------------------------------
 def validate_record_type_callback(_ctx, _param, value):
@@ -320,6 +476,67 @@ def list_dns_zones(api_token, page_size, zone_name):
         )
         zones_json = [{"name": name, "id": zone_id} for name, zone_id in zones]
         click.echo(json.dumps(zones_json, indent=2))
+    except Exception as exc:
+        click.echo(json.dumps({"error": str(exc)}, indent=2), err=True)
+        ctx.exit(1)
+
+
+@cli.command(name="remove-dns-record")
+@click.option("--zone-name", required=True, help="Zone name in Cloudflare.")
+@click.option(
+    "--api-token",
+    envvar="CLOUDFLARE_API_TOKEN",
+    help="API token with dns.edit permission (or set CLOUDFLARE_API_TOKEN).",
+)
+@click.option(
+    "--record-name",
+    required=True,
+    help="Full record name to remove (e.g., passbolt.example.com).",
+)
+def remove_dns_record(zone_name, api_token, record_name):
+    """Remove a DNS record from a specific zone after user confirmation."""
+    ctx = click.get_current_context()
+    try:
+        token = get_api_token(api_token)
+        zone_id = get_zone_id_by_name(token, zone_name)
+        record = find_dns_record_by_name(zone_id, token, record_name)
+
+        prompt = (
+            f"Remover o registro '{record_name}' (tipo {record.get('type')}) "
+            f"da zona '{zone_name}'?"
+        )
+        if not click.confirm(prompt, default=False):
+            click.echo(json.dumps({"status": "cancelled"}, indent=2))
+            return
+
+        response = remove_dns_record_api(zone_id, token, record.get("id"))
+        click.echo(json.dumps(response, indent=2))
+    except Exception as exc:
+        click.echo(json.dumps({"error": str(exc)}, indent=2), err=True)
+        ctx.exit(1)
+
+
+@cli.command(name="list-dns-records")
+@click.option("--zone-name", required=True, help="Zone name in Cloudflare.")
+@click.option(
+    "--api-token",
+    envvar="CLOUDFLARE_API_TOKEN",
+    help="API token with dns.read permission (or set CLOUDFLARE_API_TOKEN).",
+)
+@click.option(
+    "--page-size",
+    default=100,
+    show_default=True,
+    help="Number of records per page in the paginated request.",
+)
+def list_dns_records(zone_name, api_token, page_size):
+    """List DNS records of a zone in a table."""
+    ctx = click.get_current_context()
+    try:
+        token = get_api_token(api_token)
+        zone_id = get_zone_id_by_name(token, zone_name)
+        records = list_dns_records_api(zone_id, token, items_per_page=page_size)
+        _print_dns_records_table(records)
     except Exception as exc:
         click.echo(json.dumps({"error": str(exc)}, indent=2), err=True)
         ctx.exit(1)
