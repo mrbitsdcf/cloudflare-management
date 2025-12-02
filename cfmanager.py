@@ -19,6 +19,7 @@ Requires:
     pip install requests click
 """
 
+import json
 import logging
 import os
 import click
@@ -34,6 +35,19 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 logger = logging.getLogger(__name__)
+
+
+# ------------------------------------------------------------
+# Helper for logging JSON responses
+# ------------------------------------------------------------
+def _log_response_json(response):
+    """Pretty-print a JSON response body for logs, fallback to raw text."""
+    try:
+        parsed = response.json()
+        pretty = json.dumps(parsed, indent=2, ensure_ascii=False)
+        logger.error("Response JSON:\n%s", pretty)
+    except ValueError:
+        logger.error("Response text: %s", response.text)
 
 
 # ------------------------------------------------------------
@@ -53,15 +67,10 @@ def validate_record_type(record_type):
 # Token retrieval (command line or environment variable)
 # ------------------------------------------------------------
 def get_api_token(cli_token):
-    """Retrieve the API token from the CLI or the environment variable."""
-    if cli_token:
-        logger.info("Token provided via command line.")
-        return cli_token
-
-    env_token = os.getenv("CLOUDFLARE_API_TOKEN")
-    if env_token:
-        logger.info("Token provided via CLOUDFLARE_API_TOKEN environment variable.")
-        return env_token
+    """Retrieve the API token from CLI or environment."""
+    token = cli_token or os.getenv("CLOUDFLARE_API_TOKEN")
+    if token:
+        return token
 
     message = "No token found! Provide --api-token or set CLOUDFLARE_API_TOKEN."
     logger.error(message)
@@ -104,7 +113,7 @@ def create_dns_record_api(zone_id, api_token, hostname, record_type, value):
     if not response.ok:
         message = f"HTTP error while creating record: {response.status_code}"
         logger.error(message)
-        logger.error("Response: %s", response.text)
+        _log_response_json(response)
         raise click.ClickException(message)
 
     data = response.json()
@@ -113,6 +122,7 @@ def create_dns_record_api(zone_id, api_token, hostname, record_type, value):
         message = "Failed to create the DNS record on Cloudflare."
         logger.error(message)
         logger.error("Errors: %s", data.get("errors"))
+        _log_response_json(response)
         raise click.ClickException(message)
 
     logger.info("DNS record created successfully!")
@@ -154,7 +164,7 @@ def list_dns_zones_api(api_token, items_per_page=50, zone_name=None):
 
         if not response.ok:
             logger.error("HTTP error while listing zones: %s", response.status_code)
-            logger.error("Response: %s", response.text)
+            _log_response_json(response)
             raise click.ClickException(
                 f"HTTP error while listing zones: {response.status_code}"
             )
@@ -163,6 +173,7 @@ def list_dns_zones_api(api_token, items_per_page=50, zone_name=None):
         if not data.get("success", False):
             logger.error("Failed to list zones on Cloudflare.")
             logger.error("Errors: %s", data.get("errors"))
+            _log_response_json(response)
             raise click.ClickException("Failed to list zones on Cloudflare.")
 
         zones.extend(
@@ -209,7 +220,7 @@ def get_zone_id_by_name(api_token, zone_name):
 
     if not response.ok:
         logger.error("HTTP error while fetching zone: %s", response.status_code)
-        logger.error("Response: %s", response.text)
+        _log_response_json(response)
         raise click.ClickException(
             f"HTTP error while fetching zone: {response.status_code}"
         )
@@ -218,6 +229,7 @@ def get_zone_id_by_name(api_token, zone_name):
     if not data.get("success", False):
         logger.error("Failed to fetch zone on Cloudflare.")
         logger.error("Errors: %s", data.get("errors"))
+        _log_response_json(response)
         raise click.ClickException("Failed to fetch zone on Cloudflare.")
 
     results = data.get("result", [])
@@ -263,15 +275,21 @@ def cli():
 @click.option("--value", required=True, help="IP address or target of the DNS record.")
 def create_dns_record(zone_name, api_token, hostname, record_type, value):
     """Create a host in a specific DNS zone."""
-    token = get_api_token(api_token)
-    zone_id = get_zone_id_by_name(token, zone_name)
-    create_dns_record_api(
-        api_token=token,
-        hostname=hostname,
-        record_type=record_type,
-        value=value,
-        zone_id=zone_id,
-    )
+    ctx = click.get_current_context()
+    try:
+        token = get_api_token(api_token)
+        zone_id = get_zone_id_by_name(token, zone_name)
+        response = create_dns_record_api(
+            api_token=token,
+            hostname=hostname,
+            record_type=record_type,
+            value=value,
+            zone_id=zone_id,
+        )
+        click.echo(json.dumps(response, indent=2))
+    except Exception as exc:
+        click.echo(json.dumps({"error": str(exc)}, indent=2), err=True)
+        ctx.exit(1)
 
 
 @cli.command(name="list-dns-zones")
@@ -292,12 +310,19 @@ def create_dns_record(zone_name, api_token, hostname, record_type, value):
 )
 def list_dns_zones(api_token, page_size, zone_name):
     """List DNS zones (all or filtered by name) and show their names and IDs."""
-    token = get_api_token(api_token)
-    list_dns_zones_api(
-        api_token=token,
-        items_per_page=page_size,
-        zone_name=zone_name,
-    )
+    ctx = click.get_current_context()
+    try:
+        token = get_api_token(api_token)
+        zones = list_dns_zones_api(
+            api_token=token,
+            items_per_page=page_size,
+            zone_name=zone_name,
+        )
+        zones_json = [{"name": name, "id": zone_id} for name, zone_id in zones]
+        click.echo(json.dumps(zones_json, indent=2))
+    except Exception as exc:
+        click.echo(json.dumps({"error": str(exc)}, indent=2), err=True)
+        ctx.exit(1)
 
 
 # ------------------------------------------------------------
