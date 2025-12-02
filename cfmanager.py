@@ -1,0 +1,307 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+"""
+CLI tools to manage DNS on Cloudflare using Click.
+Fully instrumented with logging, validation, and exception handling.
+
+Supports reading CLOUDFLARE_API_TOKEN:
+ - from the command line via --api-token
+ - from the environment variable CLOUDFLARE_API_TOKEN
+
+Usage:
+    python cfmanager.py create-dns-record --zone-name mrbits.com.br \
+        --hostname "host.example.com" --type A --value "192.168.1.10"
+
+    python cfmanager.py list-dns-zones
+
+Requires:
+    pip install requests click
+"""
+
+import logging
+import os
+import click
+import requests
+
+
+# ------------------------------------------------------------
+# Detailed logging configuration
+# ------------------------------------------------------------
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)-8s | %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+logger = logging.getLogger(__name__)
+
+
+# ------------------------------------------------------------
+# Basic argument validation
+# ------------------------------------------------------------
+def validate_record_type(record_type):
+    """Validate the DNS record type provided by the user."""
+    valid_types = ["A", "AAAA", "CNAME", "TXT", "MX", "NS", "SRV", "PTR", "CAA"]
+    if record_type.upper() not in valid_types:
+        raise ValueError(
+            f"Invalid type '{record_type}'. Allowed values: {', '.join(valid_types)}"
+        )
+    return record_type.upper()
+
+
+# ------------------------------------------------------------
+# Token retrieval (command line or environment variable)
+# ------------------------------------------------------------
+def get_api_token(cli_token):
+    """Retrieve the API token from the CLI or the environment variable."""
+    if cli_token:
+        logger.info("Token provided via command line.")
+        return cli_token
+
+    env_token = os.getenv("CLOUDFLARE_API_TOKEN")
+    if env_token:
+        logger.info("Token provided via CLOUDFLARE_API_TOKEN environment variable.")
+        return env_token
+
+    message = "No token found! Provide --api-token or set CLOUDFLARE_API_TOKEN."
+    logger.error(message)
+    raise click.ClickException(message)
+
+
+# ------------------------------------------------------------
+# Create DNS record
+# ------------------------------------------------------------
+def create_dns_record_api(zone_id, api_token, hostname, record_type, value):
+    """Create a DNS record using the Cloudflare API."""
+    url = f"https://api.cloudflare.com/client/v4/zones/{zone_id}/dns_records"
+
+    payload = {
+        "type": record_type,
+        "name": hostname,
+        "content": value,
+        "ttl": 300,  # 5 minutes
+        "proxied": False,  # change to True if you want Cloudflare proxying
+    }
+
+    headers = {
+        "Authorization": f"Bearer {api_token}",
+        "Content-Type": "application/json",
+    }
+
+    logger.info("Starting DNS record creation on Cloudflare...")
+    logger.info("Zone (zone_id): %s", zone_id)
+    logger.info("Hostname: %s", hostname)
+    logger.info("Type: %s", record_type)
+    logger.info("Value: %s", value)
+
+    try:
+        response = requests.post(url, json=payload, headers=headers, timeout=15)
+    except requests.exceptions.RequestException as e:
+        message = f"Communication error with Cloudflare: {e}"
+        logger.error(message)
+        raise click.ClickException(message) from e
+
+    if not response.ok:
+        message = f"HTTP error while creating record: {response.status_code}"
+        logger.error(message)
+        logger.error("Response: %s", response.text)
+        raise click.ClickException(message)
+
+    data = response.json()
+
+    if not data.get("success", False):
+        message = "Failed to create the DNS record on Cloudflare."
+        logger.error(message)
+        logger.error("Errors: %s", data.get("errors"))
+        raise click.ClickException(message)
+
+    logger.info("DNS record created successfully!")
+    logger.info("Record ID: %s", data["result"]["id"])
+    logger.debug("Full response: %s", data)
+
+    return data
+
+
+# ------------------------------------------------------------
+# List DNS zones
+# ------------------------------------------------------------
+def list_dns_zones_api(api_token, items_per_page=50, zone_name=None):
+    """List DNS zones and return (name, id) pairs, optionally filtered by name."""
+    url = "https://api.cloudflare.com/client/v4/zones"
+    headers = {
+        "Authorization": f"Bearer {api_token}",
+        "Content-Type": "application/json",
+    }
+
+    zones = []
+    page = 1
+    while True:
+        try:
+            params = {"page": page, "per_page": items_per_page}
+            if zone_name:
+                params["name"] = zone_name
+            response = requests.get(
+                url,
+                headers=headers,
+                params=params,
+                timeout=15,
+            )
+        except requests.exceptions.RequestException as err:
+            logger.error("Communication error with Cloudflare: %s", err)
+            raise click.ClickException(
+                f"Communication error with Cloudflare: {err}"
+            ) from err
+
+        if not response.ok:
+            logger.error("HTTP error while listing zones: %s", response.status_code)
+            logger.error("Response: %s", response.text)
+            raise click.ClickException(
+                f"HTTP error while listing zones: {response.status_code}"
+            )
+
+        data = response.json()
+        if not data.get("success", False):
+            logger.error("Failed to list zones on Cloudflare.")
+            logger.error("Errors: %s", data.get("errors"))
+            raise click.ClickException("Failed to list zones on Cloudflare.")
+
+        zones.extend(
+            (item.get("name"), item.get("id")) for item in data.get("result", [])
+        )
+
+        result_info = data.get("result_info", {})
+        if result_info.get("page", page) >= result_info.get(
+            "total_pages", result_info.get("page", page)
+        ):
+            break
+        page += 1
+
+    if zone_name and not zones:
+        logger.info("No zones found for the name: %s", zone_name)
+        return zones
+
+    logger.info("Total zones found: %s", len(zones))
+    name_width = max((len(name or "") for name, _ in zones), default=0)
+    for name, zone_id in zones:
+        logger.info("Zone: %-*s | ID: %s", name_width, name, zone_id)
+
+    return zones
+
+
+# ------------------------------------------------------------
+# Utility to get zone_id by name
+# ------------------------------------------------------------
+def get_zone_id_by_name(api_token, zone_name):
+    """Get the zone_id from the exact zone name."""
+    url = "https://api.cloudflare.com/client/v4/zones"
+    headers = {
+        "Authorization": f"Bearer {api_token}",
+        "Content-Type": "application/json",
+    }
+    params = {"name": zone_name, "per_page": 1}
+    try:
+        response = requests.get(url, headers=headers, params=params, timeout=15)
+    except requests.exceptions.RequestException as err:
+        logger.error("Communication error with Cloudflare: %s", err)
+        raise click.ClickException(
+            f"Communication error with Cloudflare: {err}"
+        ) from err
+
+    if not response.ok:
+        logger.error("HTTP error while fetching zone: %s", response.status_code)
+        logger.error("Response: %s", response.text)
+        raise click.ClickException(
+            f"HTTP error while fetching zone: {response.status_code}"
+        )
+
+    data = response.json()
+    if not data.get("success", False):
+        logger.error("Failed to fetch zone on Cloudflare.")
+        logger.error("Errors: %s", data.get("errors"))
+        raise click.ClickException("Failed to fetch zone on Cloudflare.")
+
+    results = data.get("result", [])
+    if not results:
+        raise click.ClickException(f"Zone not found: {zone_name}")
+
+    zone_id = results[0].get("id")
+    logger.info("Zone found: %s | ID: %s", zone_name, zone_id)
+    return zone_id
+
+
+# ------------------------------------------------------------
+# CLI with Click
+# ------------------------------------------------------------
+def validate_record_type_callback(_ctx, _param, value):
+    """Validate record type for Click options."""
+    try:
+        return validate_record_type(value)
+    except ValueError as exc:
+        raise click.BadParameter(str(exc)) from exc
+
+
+@click.group()
+def cli():
+    """CLI tools for DNS management on Cloudflare."""
+
+
+@cli.command(name="create-dns-record")
+@click.option("--zone-name", required=True, help="Zone name in Cloudflare.")
+@click.option(
+    "--api-token",
+    envvar="CLOUDFLARE_API_TOKEN",
+    help="API token with dns.edit permission (or set CLOUDFLARE_API_TOKEN).",
+)
+@click.option("--hostname", required=True, help="Full hostname (e.g., api.example.com).")
+@click.option(
+    "--type",
+    "record_type",
+    required=True,
+    callback=validate_record_type_callback,
+    help="Record type (A, AAAA, CNAME, TXT, MX, NS, SRV, PTR, CAA).",
+)
+@click.option("--value", required=True, help="IP address or target of the DNS record.")
+def create_dns_record(zone_name, api_token, hostname, record_type, value):
+    """Create a host in a specific DNS zone."""
+    token = get_api_token(api_token)
+    zone_id = get_zone_id_by_name(token, zone_name)
+    create_dns_record_api(
+        api_token=token,
+        hostname=hostname,
+        record_type=record_type,
+        value=value,
+        zone_id=zone_id,
+    )
+
+
+@cli.command(name="list-dns-zones")
+@click.option(
+    "--api-token",
+    envvar="CLOUDFLARE_API_TOKEN",
+    help="API token with zone read permission (or set CLOUDFLARE_API_TOKEN).",
+)
+@click.option(
+    "--page-size",
+    default=50,
+    show_default=True,
+    help="Number of zones per page in the paginated request.",
+)
+@click.option(
+    "--zone-name",
+    help="Exact zone name to filter (e.g., mrbits.com.br).",
+)
+def list_dns_zones(api_token, page_size, zone_name):
+    """List DNS zones (all or filtered by name) and show their names and IDs."""
+    token = get_api_token(api_token)
+    list_dns_zones_api(
+        api_token=token,
+        items_per_page=page_size,
+        zone_name=zone_name,
+    )
+
+
+# ------------------------------------------------------------
+# Execution
+# ------------------------------------------------------------
+if __name__ == "__main__":
+    cli()
