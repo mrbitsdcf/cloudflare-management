@@ -94,4 +94,5 @@ python cfmanager.py export-dns-zone \
 
 ## Logging
 
-The CLI logs actions and API responses to stdout using a timestamped format to make troubleshooting easier.
+The CLI logs actions and API responses to stdout using a timestamped format.  
+Use `--log-file path/to/cfmanager.log` (can be passed before or after the subcommand) to also write rotating logs (1 MB, 3 backups).

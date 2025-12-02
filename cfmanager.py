@@ -25,19 +25,55 @@ Requires:
 import json
 import logging
 import os
+import sys
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 import click
 import requests
 
 
 # ------------------------------------------------------------
-# Detailed logging configuration
+# Logging configuration
 # ------------------------------------------------------------
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)-8s | %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
-)
+DEFAULT_LOG_FORMAT = "%(asctime)s | %(levelname)-8s | %(message)s"
+DEFAULT_DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
+DEFAULT_FILE_MAX_BYTES = 1_000_000  # 1 MB
+DEFAULT_FILE_BACKUPS = 3
+_LOG_CONFIGURED = False
+
+
+def configure_logging(log_file_path=None):
+    """Set up console logging and optional rotating file logging."""
+    root = logging.getLogger()
+    root.setLevel(logging.INFO)
+
+    # Clear existing handlers to avoid duplication on repeated CLI runs
+    root.handlers.clear()
+
+    console_handler = logging.StreamHandler(stream=sys.stdout)
+    console_handler.setFormatter(logging.Formatter(DEFAULT_LOG_FORMAT, DEFAULT_DATE_FORMAT))
+    root.addHandler(console_handler)
+
+    if log_file_path:
+        file_handler = RotatingFileHandler(
+            log_file_path,
+            maxBytes=DEFAULT_FILE_MAX_BYTES,
+            backupCount=DEFAULT_FILE_BACKUPS,
+            encoding="utf-8",
+        )
+        file_handler.setFormatter(logging.Formatter(DEFAULT_LOG_FORMAT, DEFAULT_DATE_FORMAT))
+        root.addHandler(file_handler)
+
+
+def ensure_logging(log_file_path=None):
+    """Configure logging once per process."""
+    global _LOG_CONFIGURED
+    if _LOG_CONFIGURED:
+        return
+    configure_logging(log_file_path)
+    _LOG_CONFIGURED = True
+
+
 logger = logging.getLogger(__name__)
 
 
@@ -451,8 +487,17 @@ def validate_record_type_callback(_ctx, _param, value):
 
 
 @click.group()
-def cli():
+@click.option(
+    "--log-file",
+    type=click.Path(dir_okay=False, writable=True, resolve_path=True),
+    help="Optional log file path; enables rotating logs (1 MB, 3 backups).",
+)
+@click.pass_context
+def cli(ctx, log_file):
     """CLI tools for DNS management on Cloudflare."""
+    ensure_logging(log_file)
+    ctx.ensure_object(dict)
+    ctx.obj["log_file"] = log_file
 
 
 @cli.command(name="create-dns-record")
@@ -471,8 +516,14 @@ def cli():
     help="Record type (A, AAAA, CNAME, TXT, MX, NS, SRV, PTR, CAA).",
 )
 @click.option("--value", required=True, help="IP address or target of the DNS record.")
-def create_dns_record(zone_name, api_token, hostname, record_type, value):
+@click.option(
+    "--log-file",
+    type=click.Path(dir_okay=False, writable=True, resolve_path=True),
+    help="Optional log file path; enables rotating logs (1 MB, 3 backups).",
+)
+def create_dns_record(zone_name, api_token, hostname, record_type, value, log_file):
     """Create a host in a specific DNS zone."""
+    ensure_logging(log_file)
     ctx = click.get_current_context()
     try:
         token = get_api_token(api_token)
@@ -506,18 +557,22 @@ def create_dns_record(zone_name, api_token, hostname, record_type, value):
     "--zone-name",
     help="Exact zone name to filter (e.g., example.com).",
 )
-def list_dns_zones(api_token, page_size, zone_name):
+@click.option(
+    "--log-file",
+    type=click.Path(dir_okay=False, writable=True, resolve_path=True),
+    help="Optional log file path; enables rotating logs (1 MB, 3 backups).",
+)
+def list_dns_zones(api_token, page_size, zone_name, log_file):
     """List DNS zones (all or filtered by name) and show their names and IDs."""
+    ensure_logging(log_file)
     ctx = click.get_current_context()
     try:
         token = get_api_token(api_token)
-        zones = list_dns_zones_api(
+        list_dns_zones_api(
             api_token=token,
             items_per_page=page_size,
             zone_name=zone_name,
         )
-        zones_json = [{"name": name, "id": zone_id} for name, zone_id in zones]
-        click.echo(json.dumps(zones_json, indent=2))
     except Exception as exc:
         click.echo(json.dumps({"error": str(exc)}, indent=2), err=True)
         ctx.exit(1)
@@ -535,8 +590,14 @@ def list_dns_zones(api_token, page_size, zone_name):
     required=True,
     help="Full record name to remove (e.g., passbolt.example.com).",
 )
-def remove_dns_record(zone_name, api_token, record_name):
+@click.option(
+    "--log-file",
+    type=click.Path(dir_okay=False, writable=True, resolve_path=True),
+    help="Optional log file path; enables rotating logs (1 MB, 3 backups).",
+)
+def remove_dns_record(zone_name, api_token, record_name, log_file):
     """Remove a DNS record from a specific zone after user confirmation."""
+    ensure_logging(log_file)
     ctx = click.get_current_context()
     try:
         token = get_api_token(api_token)
@@ -571,8 +632,14 @@ def remove_dns_record(zone_name, api_token, record_name):
     show_default=True,
     help="Number of records per page in the paginated request.",
 )
-def list_dns_records(zone_name, api_token, page_size):
+@click.option(
+    "--log-file",
+    type=click.Path(dir_okay=False, writable=True, resolve_path=True),
+    help="Optional log file path; enables rotating logs (1 MB, 3 backups).",
+)
+def list_dns_records(zone_name, api_token, page_size, log_file):
     """List DNS records of a zone in a table."""
+    ensure_logging(log_file)
     ctx = click.get_current_context()
     try:
         token = get_api_token(api_token)
@@ -597,8 +664,14 @@ def list_dns_records(zone_name, api_token, page_size):
     type=click.Path(dir_okay=False, writable=True, resolve_path=True),
     help="Output file path (defaults to <zone-name>.zone).",
 )
-def export_dns_zone(zone_name, api_token, output_path):
+@click.option(
+    "--log-file",
+    type=click.Path(dir_okay=False, writable=True, resolve_path=True),
+    help="Optional log file path; enables rotating logs (1 MB, 3 backups).",
+)
+def export_dns_zone(zone_name, api_token, output_path, log_file):
     """Export DNS records of a zone to a BIND9-style file."""
+    ensure_logging(log_file)
     ctx = click.get_current_context()
     try:
         token = get_api_token(api_token)
