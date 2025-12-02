@@ -22,6 +22,7 @@ Requires:
 import json
 import logging
 import os
+from pathlib import Path
 import click
 import requests
 
@@ -328,6 +329,31 @@ def remove_dns_record_api(zone_id, api_token, record_id):
     return data
 
 
+def export_dns_zone_api(zone_id, api_token):
+    """Export DNS records of a zone in BIND format."""
+    url = f"https://api.cloudflare.com/client/v4/zones/{zone_id}/dns_records/export"
+    headers = {
+        "Authorization": f"Bearer {api_token}",
+    }
+
+    try:
+        response = requests.get(url, headers=headers, timeout=30)
+    except requests.exceptions.RequestException as err:
+        logger.error("Communication error with Cloudflare: %s", err)
+        raise click.ClickException(
+            f"Communication error with Cloudflare: {err}"
+        ) from err
+
+    if not response.ok:
+        logger.error("HTTP error while exporting zone: %s", response.status_code)
+        _log_response_json(response)
+        raise click.ClickException(
+            f"HTTP error while exporting zone: {response.status_code}"
+        )
+
+    return response.text
+
+
 def list_dns_records_api(zone_id, api_token, items_per_page=100):
     """List DNS records for a zone."""
     url = f"https://api.cloudflare.com/client/v4/zones/{zone_id}/dns_records"
@@ -550,6 +576,40 @@ def list_dns_records(zone_name, api_token, page_size):
         zone_id = get_zone_id_by_name(token, zone_name)
         records = list_dns_records_api(zone_id, token, items_per_page=page_size)
         _print_dns_records_table(records)
+    except Exception as exc:
+        click.echo(json.dumps({"error": str(exc)}, indent=2), err=True)
+        ctx.exit(1)
+
+
+@cli.command(name="export-dns-zone")
+@click.option("--zone-name", required=True, help="Zone name in Cloudflare.")
+@click.option(
+    "--api-token",
+    envvar="CLOUDFLARE_API_TOKEN",
+    help="API token with dns.read permission (or set CLOUDFLARE_API_TOKEN).",
+)
+@click.option(
+    "--output",
+    "output_path",
+    type=click.Path(dir_okay=False, writable=True, resolve_path=True),
+    help="Output file path (defaults to <zone-name>.zone).",
+)
+def export_dns_zone(zone_name, api_token, output_path):
+    """Export DNS records of a zone to a BIND9-style file."""
+    ctx = click.get_current_context()
+    try:
+        token = get_api_token(api_token)
+        zone_id = get_zone_id_by_name(token, zone_name)
+        zone_bind = export_dns_zone_api(zone_id, token)
+
+        if output_path:
+            path = Path(output_path)
+        else:
+            safe_name = zone_name.replace("/", "_")
+            path = Path(f"{safe_name}.zone")
+
+        path.write_text(zone_bind, encoding="utf-8")
+        click.echo(json.dumps({"status": "ok", "file": str(path)}, indent=2))
     except Exception as exc:
         click.echo(json.dumps({"error": str(exc)}, indent=2), err=True)
         ctx.exit(1)
