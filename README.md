@@ -18,6 +18,19 @@ Command-line tools to manage DNS zones and records on Cloudflare using the offic
 pip install -r requirements.txt
 ```
 
+## Development & Tests
+
+```bash
+# Install dev dependencies (pytest, coverage helpers)
+pip install -r requirements-dev.txt
+
+# Run the test suite
+python -m pytest
+
+# With coverage report
+python -m pytest --cov=cfmanager --cov-report=term-missing
+```
+
 ## Configuration
 
 - Provide your token via `--api-token` **or** set the environment variable (safer option):
