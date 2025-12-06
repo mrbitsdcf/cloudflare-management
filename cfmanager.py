@@ -22,6 +22,8 @@ Requires:
     pip install requests click
 """
 
+import functools
+import inspect
 import json
 import logging
 import os
@@ -52,7 +54,9 @@ def configure_logging(log_file_path=None):
     root.handlers.clear()
 
     console_handler = logging.StreamHandler(stream=sys.stdout)
-    console_handler.setFormatter(logging.Formatter(DEFAULT_LOG_FORMAT, DEFAULT_DATE_FORMAT))
+    console_handler.setFormatter(
+        logging.Formatter(DEFAULT_LOG_FORMAT, DEFAULT_DATE_FORMAT)
+    )
     root.addHandler(console_handler)
 
     if log_file_path:
@@ -63,7 +67,9 @@ def configure_logging(log_file_path=None):
             backupCount=DEFAULT_FILE_BACKUPS,
             encoding="utf-8",
         )
-        file_handler.setFormatter(logging.Formatter(DEFAULT_LOG_FORMAT, DEFAULT_DATE_FORMAT))
+        file_handler.setFormatter(
+            logging.Formatter(DEFAULT_LOG_FORMAT, DEFAULT_DATE_FORMAT)
+        )
         root.addHandler(file_handler)
 
 
@@ -86,12 +92,107 @@ def ensure_logging(log_file_path=None):
             backupCount=DEFAULT_FILE_BACKUPS,
             encoding="utf-8",
         )
-        file_handler.setFormatter(logging.Formatter(DEFAULT_LOG_FORMAT, DEFAULT_DATE_FORMAT))
+        file_handler.setFormatter(
+            logging.Formatter(DEFAULT_LOG_FORMAT, DEFAULT_DATE_FORMAT)
+        )
         logging.getLogger().addHandler(file_handler)
         _LOG_FILE_PATH = log_file_path
 
 
 logger = logging.getLogger(__name__)
+
+
+# ------------------------------------------------------------
+# Helpers de logging reutilizáveis
+# ------------------------------------------------------------
+def _build_log_message(message_builder, arguments):
+    message_data = message_builder(arguments)
+    if isinstance(message_data, tuple):
+        message, message_args = message_data
+        if message_args is None:
+            message_args = ()
+        elif isinstance(message_args, list):
+            message_args = tuple(message_args)
+        else:
+            message_args = (message_args,)
+    else:
+        message, message_args = message_data, ()
+    return message, message_args
+
+
+# ------------------------------------------------------------
+# Decorator para logar chamadas de comandos Click
+# ------------------------------------------------------------
+def log_command_invocation(message_builder):
+    """Configura logging e registra a chamada de um comando de forma reutilizável."""
+
+    def decorator(func):
+        signature = inspect.signature(func)
+
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            bound = signature.bind_partial(*args, **kwargs)
+            bound.apply_defaults()
+
+            ctx = click.get_current_context(silent=True)
+            ctx_obj = (ctx.obj or {}) if ctx else {}
+            log_file = bound.arguments.get("log_file") or ctx_obj.get("log_file")
+            ensure_logging(log_file)
+
+            message, message_args = _build_log_message(message_builder, bound.arguments)
+            logger.info(message, *message_args)
+
+            bound.arguments["log_file"] = log_file
+            return func(**bound.arguments)
+
+        wrapper.__signature__ = signature  # pyright: ignore[reportAttributeAccessIssue]
+        return wrapper
+
+    return decorator
+
+
+# ------------------------------------------------------------
+# Decorator para funções auxiliares (info + captura de erros de rede)
+# ------------------------------------------------------------
+def log_api_invocation(message_builder=None):
+    """
+    Loga a chamada de uma função auxiliar e converte falhas de rede em ClickException.
+
+    message_builder deve receber um dict de argumentos e retornar uma string
+    ou (string, args) para ser passado ao logger.
+    """
+
+    def decorator(func):
+        signature = inspect.signature(func)
+
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            bound = signature.bind_partial(*args, **kwargs)
+            bound.apply_defaults()
+
+            if message_builder:
+                message, message_args = _build_log_message(
+                    message_builder, bound.arguments
+                )
+                logger.info(message, *message_args)
+
+            try:
+                return func(*args, **kwargs)
+            except click.ClickException:
+                raise
+            except requests.exceptions.RequestException as exc:
+                logger.error("Communication error with Cloudflare: %s", exc)
+                raise click.ClickException(
+                    f"Communication error with Cloudflare: {exc}"
+                ) from exc
+            except Exception:
+                logger.error("Unexpected error in %s", func.__name__, exc_info=True)
+                raise
+
+        wrapper.__signature__ = signature  # pyright: ignore[reportAttributeAccessIssue]
+        return wrapper
+
+    return decorator
 
 
 # ------------------------------------------------------------
@@ -137,6 +238,12 @@ def get_api_token(cli_token):
 # ------------------------------------------------------------
 # Create DNS record
 # ------------------------------------------------------------
+@log_api_invocation(
+    lambda params: (
+        "Creating DNS record zone_id=%s host=%s type=%s value=%s",
+        (params["zone_id"], params["hostname"], params["record_type"], params["value"]),
+    )
+)
 def create_dns_record_api(zone_id, api_token, hostname, record_type, value):
     """Create a DNS record using the Cloudflare API."""
     url = f"https://api.cloudflare.com/client/v4/zones/{zone_id}/dns_records"
@@ -154,18 +261,7 @@ def create_dns_record_api(zone_id, api_token, hostname, record_type, value):
         "Content-Type": "application/json",
     }
 
-    logger.info("Starting DNS record creation on Cloudflare...")
-    logger.info("Zone (zone_id): %s", zone_id)
-    logger.info("Hostname: %s", hostname)
-    logger.info("Type: %s", record_type)
-    logger.info("Value: %s", value)
-
-    try:
-        response = requests.post(url, json=payload, headers=headers, timeout=15)
-    except requests.exceptions.RequestException as e:
-        message = f"Communication error with Cloudflare: {e}"
-        logger.error(message)
-        raise click.ClickException(message) from e
+    response = requests.post(url, json=payload, headers=headers, timeout=15)
 
     if not response.ok:
         message = f"HTTP error while creating record: {response.status_code}"
@@ -192,6 +288,12 @@ def create_dns_record_api(zone_id, api_token, hostname, record_type, value):
 # ------------------------------------------------------------
 # List DNS zones
 # ------------------------------------------------------------
+@log_api_invocation(
+    lambda params: (
+        "Listing DNS zones filter=%s page_size=%s",
+        (params.get("zone_name"), params.get("items_per_page")),
+    )
+)
 def list_dns_zones_api(api_token, items_per_page=50, zone_name=None):
     """List DNS zones and return (name, id) pairs, optionally filtered by name."""
     url = "https://api.cloudflare.com/client/v4/zones"
@@ -203,21 +305,15 @@ def list_dns_zones_api(api_token, items_per_page=50, zone_name=None):
     zones = []
     page = 1
     while True:
-        try:
-            params = {"page": page, "per_page": items_per_page}
-            if zone_name:
-                params["name"] = zone_name
-            response = requests.get(
-                url,
-                headers=headers,
-                params=params,
-                timeout=15,
-            )
-        except requests.exceptions.RequestException as err:
-            logger.error("Communication error with Cloudflare: %s", err)
-            raise click.ClickException(
-                f"Communication error with Cloudflare: {err}"
-            ) from err
+        params = {"page": page, "per_page": items_per_page}
+        if zone_name:
+            params["name"] = zone_name
+        response = requests.get(
+            url,
+            headers=headers,
+            params=params,
+            timeout=15,
+        )
 
         if not response.ok:
             logger.error("HTTP error while listing zones: %s", response.status_code)
@@ -259,6 +355,7 @@ def list_dns_zones_api(api_token, items_per_page=50, zone_name=None):
 # ------------------------------------------------------------
 # Utility to get zone_id by name
 # ------------------------------------------------------------
+@log_api_invocation(lambda params: ("Fetching zone id for %s", (params["zone_name"],)))
 def get_zone_id_by_name(api_token, zone_name):
     """Get the zone_id from the exact zone name."""
     url = "https://api.cloudflare.com/client/v4/zones"
@@ -267,13 +364,7 @@ def get_zone_id_by_name(api_token, zone_name):
         "Content-Type": "application/json",
     }
     params = {"name": zone_name, "per_page": 1}
-    try:
-        response = requests.get(url, headers=headers, params=params, timeout=15)
-    except requests.exceptions.RequestException as err:
-        logger.error("Communication error with Cloudflare: %s", err)
-        raise click.ClickException(
-            f"Communication error with Cloudflare: {err}"
-        ) from err
+    response = requests.get(url, headers=headers, params=params, timeout=15)
 
     if not response.ok:
         logger.error("HTTP error while fetching zone: %s", response.status_code)
@@ -301,6 +392,12 @@ def get_zone_id_by_name(api_token, zone_name):
 # ------------------------------------------------------------
 # Find and remove DNS record
 # ------------------------------------------------------------
+@log_api_invocation(
+    lambda params: (
+        "Looking up DNS record zone_id=%s name=%s",
+        (params["zone_id"], params["record_name"]),
+    )
+)
 def find_dns_record_by_name(zone_id, api_token, record_name):
     """Find a DNS record by exact name within a zone."""
     url = f"https://api.cloudflare.com/client/v4/zones/{zone_id}/dns_records"
@@ -310,13 +407,7 @@ def find_dns_record_by_name(zone_id, api_token, record_name):
     }
     params = {"name": record_name, "per_page": 100}
 
-    try:
-        response = requests.get(url, headers=headers, params=params, timeout=15)
-    except requests.exceptions.RequestException as err:
-        logger.error("Communication error with Cloudflare: %s", err)
-        raise click.ClickException(
-            f"Communication error with Cloudflare: {err}"
-        ) from err
+    response = requests.get(url, headers=headers, params=params, timeout=15)
 
     if not response.ok:
         logger.error("HTTP error while fetching DNS record: %s", response.status_code)
@@ -352,21 +443,23 @@ def find_dns_record_by_name(zone_id, api_token, record_name):
     return record
 
 
+@log_api_invocation(
+    lambda params: (
+        "Deleting DNS record zone_id=%s record_id=%s",
+        (params["zone_id"], params["record_id"]),
+    )
+)
 def remove_dns_record_api(zone_id, api_token, record_id):
     """Remove a DNS record using the Cloudflare API."""
-    url = f"https://api.cloudflare.com/client/v4/zones/{zone_id}/dns_records/{record_id}"
+    url = (
+        f"https://api.cloudflare.com/client/v4/zones/{zone_id}/dns_records/{record_id}"
+    )
     headers = {
         "Authorization": f"Bearer {api_token}",
         "Content-Type": "application/json",
     }
 
-    try:
-        response = requests.delete(url, headers=headers, timeout=15)
-    except requests.exceptions.RequestException as err:
-        logger.error("Communication error with Cloudflare: %s", err)
-        raise click.ClickException(
-            f"Communication error with Cloudflare: {err}"
-        ) from err
+    response = requests.delete(url, headers=headers, timeout=15)
 
     if not response.ok:
         message = f"HTTP error while deleting record: {response.status_code}"
@@ -385,6 +478,9 @@ def remove_dns_record_api(zone_id, api_token, record_id):
     return data
 
 
+@log_api_invocation(
+    lambda params: ("Exporting DNS zone zone_id=%s", (params["zone_id"],))
+)
 def export_dns_zone_api(zone_id, api_token):
     """Export DNS records of a zone in BIND format."""
     url = f"https://api.cloudflare.com/client/v4/zones/{zone_id}/dns_records/export"
@@ -392,13 +488,7 @@ def export_dns_zone_api(zone_id, api_token):
         "Authorization": f"Bearer {api_token}",
     }
 
-    try:
-        response = requests.get(url, headers=headers, timeout=30)
-    except requests.exceptions.RequestException as err:
-        logger.error("Communication error with Cloudflare: %s", err)
-        raise click.ClickException(
-            f"Communication error with Cloudflare: {err}"
-        ) from err
+    response = requests.get(url, headers=headers, timeout=30)
 
     if not response.ok:
         logger.error("HTTP error while exporting zone: %s", response.status_code)
@@ -410,6 +500,12 @@ def export_dns_zone_api(zone_id, api_token):
     return response.text
 
 
+@log_api_invocation(
+    lambda params: (
+        "Listing DNS records zone_id=%s page_size=%s",
+        (params["zone_id"], params["items_per_page"]),
+    )
+)
 def list_dns_records_api(zone_id, api_token, items_per_page=100):
     """List DNS records for a zone."""
     url = f"https://api.cloudflare.com/client/v4/zones/{zone_id}/dns_records"
@@ -422,16 +518,12 @@ def list_dns_records_api(zone_id, api_token, items_per_page=100):
     page = 1
     while True:
         params = {"page": page, "per_page": items_per_page}
-        try:
-            response = requests.get(url, headers=headers, params=params, timeout=15)
-        except requests.exceptions.RequestException as err:
-            logger.error("Communication error with Cloudflare: %s", err)
-            raise click.ClickException(
-                f"Communication error with Cloudflare: {err}"
-            ) from err
+        response = requests.get(url, headers=headers, params=params, timeout=15)
 
         if not response.ok:
-            logger.error("HTTP error while listing DNS records: %s", response.status_code)
+            logger.error(
+                "HTTP error while listing DNS records: %s", response.status_code
+            )
             _log_response_json(response)
             raise click.ClickException(
                 f"HTTP error while listing DNS records: {response.status_code}"
@@ -524,7 +616,9 @@ def cli(ctx, log_file):
     envvar="CLOUDFLARE_API_TOKEN",
     help="API token with dns.edit permission (or set CLOUDFLARE_API_TOKEN).",
 )
-@click.option("--hostname", required=True, help="Full hostname (e.g., api.example.com).")
+@click.option(
+    "--hostname", required=True, help="Full hostname (e.g., api.example.com)."
+)
 @click.option(
     "--type",
     "record_type",
@@ -538,12 +632,15 @@ def cli(ctx, log_file):
     type=click.Path(dir_okay=False, writable=True, resolve_path=True),
     help="Optional log file path; enables rotating logs (1 MB, 3 backups).",
 )
+@log_command_invocation(
+    lambda params: (
+        "Command=create-dns-record zone=%s host=%s type=%s",
+        (params["zone_name"], params["hostname"], params["record_type"]),
+    )
+)
 def create_dns_record(zone_name, api_token, hostname, record_type, value, log_file):
     """Create a host in a specific DNS zone."""
     ctx = click.get_current_context()
-    log_file = log_file or ctx.obj.get("log_file")
-    ensure_logging(log_file)
-    logger.info("Command=create-dns-record zone=%s host=%s type=%s", zone_name, hostname, record_type)
     try:
         token = get_api_token(api_token)
         zone_id = get_zone_id_by_name(token, zone_name)
@@ -581,12 +678,15 @@ def create_dns_record(zone_name, api_token, hostname, record_type, value, log_fi
     type=click.Path(dir_okay=False, writable=True, resolve_path=True),
     help="Optional log file path; enables rotating logs (1 MB, 3 backups).",
 )
+@log_command_invocation(
+    lambda params: (
+        "Command=list-dns-zones zone_filter=%s page_size=%s",
+        (params["zone_name"], params["page_size"]),
+    )
+)
 def list_dns_zones(api_token, page_size, zone_name, log_file):
     """List DNS zones (all or filtered by name) and show their names and IDs."""
     ctx = click.get_current_context()
-    log_file = log_file or ctx.obj.get("log_file")
-    ensure_logging(log_file)
-    logger.info("Command=list-dns-zones zone_filter=%s page_size=%s", zone_name, page_size)
     try:
         token = get_api_token(api_token)
         list_dns_zones_api(
@@ -616,12 +716,15 @@ def list_dns_zones(api_token, page_size, zone_name, log_file):
     type=click.Path(dir_okay=False, writable=True, resolve_path=True),
     help="Optional log file path; enables rotating logs (1 MB, 3 backups).",
 )
+@log_command_invocation(
+    lambda params: (
+        "Command=remove-dns-record zone=%s record=%s",
+        (params["zone_name"], params["record_name"]),
+    )
+)
 def remove_dns_record(zone_name, api_token, record_name, log_file):
     """Remove a DNS record from a specific zone after user confirmation."""
     ctx = click.get_current_context()
-    log_file = log_file or ctx.obj.get("log_file")
-    ensure_logging(log_file)
-    logger.info("Command=remove-dns-record zone=%s record=%s", zone_name, record_name)
     try:
         token = get_api_token(api_token)
         zone_id = get_zone_id_by_name(token, zone_name)
@@ -660,12 +763,15 @@ def remove_dns_record(zone_name, api_token, record_name, log_file):
     type=click.Path(dir_okay=False, writable=True, resolve_path=True),
     help="Optional log file path; enables rotating logs (1 MB, 3 backups).",
 )
+@log_command_invocation(
+    lambda params: (
+        "Command=list-dns-records zone=%s page_size=%s",
+        (params["zone_name"], params["page_size"]),
+    )
+)
 def list_dns_records(zone_name, api_token, page_size, log_file):
     """List DNS records of a zone in a table."""
     ctx = click.get_current_context()
-    log_file = log_file or ctx.obj.get("log_file")
-    ensure_logging(log_file)
-    logger.info("Command=list-dns-records zone=%s page_size=%s", zone_name, page_size)
     try:
         token = get_api_token(api_token)
         zone_id = get_zone_id_by_name(token, zone_name)
@@ -694,12 +800,15 @@ def list_dns_records(zone_name, api_token, page_size, log_file):
     type=click.Path(dir_okay=False, writable=True, resolve_path=True),
     help="Optional log file path; enables rotating logs (1 MB, 3 backups).",
 )
+@log_command_invocation(
+    lambda params: (
+        "Command=export-dns-zone zone=%s output=%s",
+        (params["zone_name"], params["output_path"]),
+    )
+)
 def export_dns_zone(zone_name, api_token, output_path, log_file):
     """Export DNS records of a zone to a BIND9-style file."""
     ctx = click.get_current_context()
-    log_file = log_file or ctx.obj.get("log_file")
-    ensure_logging(log_file)
-    logger.info("Command=export-dns-zone zone=%s output=%s", zone_name, output_path)
     try:
         token = get_api_token(api_token)
         zone_id = get_zone_id_by_name(token, zone_name)
